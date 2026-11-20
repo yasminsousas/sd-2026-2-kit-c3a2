@@ -1,0 +1,43 @@
+# Blueprint do Render: cria a plataforma inteira (plano gratis) a partir do repositorio.
+# Render Dashboard > New > Blueprint > selecione este repositorio.
+# Detalhes em deploy/INSTRUCOES.md.
+
+services:
+  # Gateway + inferencia + worker (processos separados na mesma imagem; ver deploy/render/Dockerfile)
+  - type: web
+    name: plataforma-ia
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./deploy/render/Dockerfile
+    dockerContext: .
+    healthCheckPath: /saude
+    autoDeploy: true            # publica de novo a cada push na main
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: plataforma-ia-redis
+          property: connectionString
+      - key: URL_INFERENCIA
+        value: http://127.0.0.1:8001
+      - key: JWT_SEGREDO
+        generateValue: true     # o Render gera um segredo aleatorio (fora do codigo)
+      - key: JWT_EXPIRACAO_MIN
+        value: "60"
+      - key: USUARIO_PADRAO
+        value: admin
+      - key: SENHA_PADRAO
+        sync: false             # o Render pede para voce digitar no painel
+      - key: RATE_LIMIT_RPM
+        value: "30"
+      - key: TTL_RESULTADOS_SEG
+        value: "3600"
+
+  # Fila e resultados (Redis gerenciado, gratis). Acessivel so pela rede privada do Render.
+  - type: keyvalue
+    name: plataforma-ia-redis
+    plan: free
+    region: oregon
+    maxmemoryPolicy: noeviction   # nao descartar mensagens da fila quando encher
+    ipAllowList: []               # sem acesso externo
