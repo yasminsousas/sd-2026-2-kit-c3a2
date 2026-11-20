@@ -1,0 +1,162 @@
+# Worker, separado em DOIS Deployments da mesma imagem, escolhendo as filas
+# por WORKER_FILAS:
+#
+# - worker-ingestao (WORKER_FILAS=ingestao): ESCRITOR UNICO do indice vetorial.
+#   replicas: 1 e strategy Recreate - num RollingUpdate o pod novo subiria antes
+#   do antigo morrer e haveria dois escritores no mesmo arquivo (sem trava).
+# - worker-inferencia (WORKER_FILAS=inferencia): sem estado local, escala
+#   horizontalmente pelo tamanho de fila:inferencia (KEDA, ver keda.yaml).
+#
+# O worker nao tem HTTP. A liveness verifica o batimento que o proprio worker
+# renova no Redis a cada volta do laco (worker:batimento:<hostname>, TTL 15 s);
+# no Kubernetes o hostname e o nome do pod. Laco travado = sem batimento =
+# reinicio. failureThreshold alto para uma queda curta do Redis nao derrubar
+# todos os workers de uma vez.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-ingestao
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: worker-ingestao
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  replicas: 1                # NAO aumente: escritor unico do indice
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker-ingestao
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: worker-ingestao
+        app.kubernetes.io/part-of: plataforma-ia
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001         # o volume do indice fica gravavel pelo usuario 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/<owner>/plataforma-ia-worker:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "servicos.worker.worker"]
+          envFrom:
+            - configMapRef:
+                name: plataforma-ia-config
+          env:
+            - name: WORKER_FILAS
+              value: ingestao
+            - name: OTEL_SERVICE_NAME
+              value: worker-ingestao
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,socket,redis; r=redis.Redis.from_url(os.environ['REDIS_URL'],socket_timeout=3); raise SystemExit(0 if r.exists('worker:batimento:'+socket.gethostname()) else 1)"
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: indice
+              mountPath: /dados
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: indice
+          persistentVolumeClaim:
+            claimName: indice-vetorial
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-inferencia
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: worker-inferencia
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  replicas: 1                # valor inicial; depois quem decide e o KEDA (keda.yaml)
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker-inferencia
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: worker-inferencia
+        app.kubernetes.io/part-of: plataforma-ia
+    spec:
+      automountServiceAccountToken: false
+      # Ao reduzir replicas, o KEDA/HPA manda SIGTERM: o worker termina o job em
+      # andamento. Se for morto antes, a mensagem continua em
+      # fila:inferencia:processando e e recuperada (entrega pelo menos uma vez).
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/<owner>/plataforma-ia-worker:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "servicos.worker.worker"]
+          envFrom:
+            - configMapRef:
+                name: plataforma-ia-config
+          env:
+            - name: WORKER_FILAS
+              value: inferencia
+            - name: OTEL_SERVICE_NAME
+              value: worker-inferencia
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,socket,redis; r=redis.Redis.from_url(os.environ['REDIS_URL'],socket_timeout=3); raise SystemExit(0 if r.exists('worker:batimento:'+socket.gethostname()) else 1)"
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

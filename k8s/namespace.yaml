@@ -1,0 +1,10 @@
+# Namespace isolado para toda a plataforma.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: plataforma-ia
+  labels:
+    app.kubernetes.io/part-of: plataforma-ia
+    # Pod Security Admission: recusa pods privilegiados/root no namespace.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

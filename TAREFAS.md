@@ -1,49 +1,37 @@
 # TAREFAS - Trabalho C3.A2 (Plataforma de IA como Servico)
 
-Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
+Projeto integrador: reaproveita o C2.A2 (RAG distribuido, indice vetorial, worker confiavel) e o
+servico de inferencia + worker de fila do C3.A2. Detalhes de cada item no README.
 
 ## Nucleo obrigatorio
 
-- [ ] **1. Autenticacao JWT no gateway** - `gateway/app.py`
-      Rota de login que emite o token e protecao das demais rotas (401 sem token). (Aula 16)
-
-- [ ] **2. Rate limit no gateway** - `gateway/app.py`
-      Limitar requisicoes por cliente por minuto. (Aula 8)
-
-- [ ] **3. Dockerfile de cada servico**
-      Um Dockerfile por servico. Use `Dockerfile.exemplo` como ponto de partida. (Aula 13)
-
-- [ ] **4. docker-compose completo**
-      O sistema inteiro deve subir com UM comando. (Aula 14)
-
-- [ ] **5. Deploy em nuvem (free tier)**
-      Publicar e informar a URL publica no README. (Aula 13)
-
-- [ ] **6. Resiliencia**
-      Tempo-limite, retentativa com espera progressiva e circuit breaker. (Aula 11)
-
-- [ ] **7. Observabilidade**
-      Rastreamento distribuido cobrindo gateway -> fila -> worker. (Aula 15)
-
-- [ ] **8. HTTPS** no servico publicado. (Aula 16)
-
-- [ ] **9. Secao de conformidade no README**
-      Quais dados sao tratados, com qual finalidade e por quanto tempo. (LGPD, Aula 16)
-
-- [ ] **10. Relatorio de trade-offs**
-      CAP, custo e latencia do seu sistema.
+- [x] **1. Autenticacao JWT no gateway** - `servicos/gateway/autenticacao.py`, `app.py`
+      `POST /login` emite o token; demais rotas respondem 401 sem token valido.
+- [x] **2. Rate limit no gateway** - `servicos/gateway/limite.py`
+      Por usuario (30/min) e por IP no login (10/min), contado no Redis, com fallback em memoria.
+- [x] **3. Dockerfile de cada servico** - `servicos/<servico>/Dockerfile` (gateway, inferencia, vetorial, worker)
+- [x] **4. docker-compose completo** - `docker compose up --build -d` sobe tudo (+ Redis e Jaeger)
+- [ ] **5. Deploy em nuvem (free tier)** - `render.yaml` + `deploy/render/` prontos e testados localmente
+      (imagem com 512 MB). Falta aplicar o Blueprint no Render e confirmar a URL publica no README.
+- [x] **6. Resiliencia** - tempo-limite, retentativa com backoff exponencial e circuit breaker em
+      gateway, worker e inferencia (`scripts/teste_resiliencia.py --docker` prova com falhas reais)
+- [x] **7. Observabilidade** - OpenTelemetry + Jaeger; o mesmo trace cobre gateway -> fila -> worker -> inferencia
+- [ ] **8. HTTPS** no servico publicado - automatico no Render (`*.onrender.com`) + HSTS no gateway;
+      confirmar apos o deploy.
+- [x] **9. Secao de conformidade no README** - README "Conformidade com a LGPD" + `docs/LGPD.md`
+- [x] **10. Relatorio de trade-offs** - `docs/RELATORIO_TRADEOFFS.md` (CAP, custo e latencia, com medicoes)
 
 ## Extensoes opcionais
 
-- [ ] Autoescalonamento de workers conforme o tamanho da fila
+- [x] Autoescalonamento de workers conforme o tamanho da fila (`k8s/keda.yaml`)
 - [ ] Componente serverless ou na borda
-- [ ] CI/CD publicando automaticamente a cada commit
-- [ ] Painel de metricas
-- [ ] Manifests de Kubernetes
+- [x] CI/CD publicando automaticamente a cada commit (`.github/workflows/ci.yml` + `autoDeploy` do Render)
+- [ ] Painel de metricas (parcial: `GET /saude/detalhada` e Jaeger)
+- [x] Manifests de Kubernetes (`k8s/`)
 
 ## Antes de entregar
 
-- [ ] Clone em OUTRA maquina e rode o comando unico - funciona?
-- [ ] A URL publica esta no ar?
-- [ ] Toda configuracao esta em variavel de ambiente (nada fixo no codigo)?
-- [ ] Os logs estao livres de dados pessoais?
+- [x] Clone do zero e rode o comando unico - `docker compose up --build -d` + `scripts/teste_ponta_a_ponta.py`
+- [ ] A URL publica esta no ar? (`GATEWAY_URL=https://... python scripts/teste_ponta_a_ponta.py`)
+- [x] Toda configuracao esta em variavel de ambiente (nada fixo no codigo)?
+- [x] Os logs estao livres de dados pessoais? (conferido nos logs dos containers)

@@ -1,0 +1,106 @@
+# Vetorial: /indexar (publica em fila:ingestao), /buscar e /documentos.
+# Le o indice direto do volume compartilhado, montado SOMENTE LEITURA: o unico
+# escritor e o worker-ingestao. Como a escrita do indice e atomica (os.replace),
+# cada leitura ve uma versao completa - a anterior ou a nova, nunca pela metade.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vetorial
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: vetorial
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vetorial
+  ports:
+    - name: http
+      port: 8002
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vetorial
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: vetorial
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vetorial
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vetorial
+        app.kubernetes.io/part-of: plataforma-ia
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vetorial
+          image: ghcr.io/<owner>/plataforma-ia-vetorial:latest
+          imagePullPolicy: Always
+          command:
+            - uvicorn
+            - servicos.vetorial.app:app
+            - --host=0.0.0.0
+            - --port=8002
+            - --no-access-log
+          envFrom:
+            - configMapRef:
+                name: plataforma-ia-config
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: vetorial
+          ports:
+            - name: http
+              containerPort: 8002
+          readinessProbe:
+            httpGet:
+              path: /saude
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /saude
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: indice
+              mountPath: /dados
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: indice
+          persistentVolumeClaim:
+            claimName: indice-vetorial
+            readOnly: true
+        - name: tmp
+          emptyDir: {}

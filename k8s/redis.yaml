@@ -1,0 +1,126 @@
+# Redis: fila (fila:inferencia, fila:ingestao), resultados com TTL e contadores
+# de rate limit. StatefulSet de 1 replica com PVC proprio e AOF ligado, para a
+# fila sobreviver a reinicios do pod (perda maxima ~1 s com appendfsync everysec).
+# Sem replicacao: e um ponto unico de falha (ver docs/RELATORIO_TRADEOFFS.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  type: ClusterIP            # so dentro do cluster; nunca exposto
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/part-of: plataforma-ia
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999          # usuario "redis" da imagem oficial
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          args:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
+            - --dir
+            - /data
+            # noeviction: com a memoria cheia o Redis recusa escritas em vez de
+            # descartar mensagens da fila em silencio.
+            - --maxmemory
+            - 200mb
+            - --maxmemory-policy
+            - noeviction
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: dados-redis
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: dados-redis
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# Apenas os pods da plataforma falam com o Redis (defesa em profundidade;
+# exige um CNI que aplique NetworkPolicy, ex.: Calico, Cilium).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-somente-plataforma
+  namespace: plataforma-ia
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["gateway", "vetorial", "worker-ingestao", "worker-inferencia"]
+      ports:
+        - port: 6379

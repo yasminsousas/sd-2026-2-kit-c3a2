@@ -1,0 +1,20 @@
+# Configuracao NAO sensivel, compartilhada pelos servicos (via envFrom).
+# Segredos ficam em secret.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: plataforma-ia-config
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/part-of: plataforma-ia
+data:
+  REDIS_URL: "redis://redis:6379/0"
+  URL_INFERENCIA: "http://inferencia:8001"
+  URL_VETORIAL: "http://vetorial:8002"
+  DATA_DIR: "/dados"
+  TTL_RESULTADOS_SEG: "3600"
+  RATE_LIMIT_RPM: "30"
+  JWT_EXPIRACAO_MIN: "60"
+  USUARIO_PADRAO: "admin"
+  # Jaeger recebe OTLP/HTTP na 4318 (o SDK acrescenta /v1/traces).
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4318"
