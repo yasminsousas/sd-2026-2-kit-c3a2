@@ -1,55 +1,166 @@
-services:
-  
+# Plataforma de IA como Servico (C3.A2) - sobe o sistema inteiro com UM comando:
+#
+#     docker compose up --build -d
+#
+#   cliente --HTTPS/HTTP--> gateway (JWT, rate limit, timeout/retentativa/circuit breaker)
+#                              |-- REST --> inferencia (sentimento + RAG/LLM) -- REST --> vetorial
+#                              |-- REST --> vetorial (armazenamento vetorial) --fila:ingestao--+
+#                              +-- fila:inferencia ------------------------------------------+-> worker
+#   Todos exportam spans OpenTelemetry para o Jaeger (UI em http://localhost:16686).
+#
+# Nenhum .env e obrigatorio: os padroes abaixo servem para rodar localmente. Para mudar algo,
+# copie .env.example para .env. Em producao, JWT_SEGREDO e SENHA_PADRAO DEVEM ser trocados.
+# So o gateway (8000) e a UI do Jaeger (16686) sao publicados, e so em 127.0.0.1 por padrao
+# (BIND_ADDR=0.0.0.0 abre na rede). Os demais servicos ficam na rede interna do compose.
 
+x-saude: &saude
+  interval: 5s
+  timeout: 3s
+  retries: 12
+  start_period: 10s
+
+x-rastreamento: &rastreamento
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+
+services:
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]   # fila sobrevive a reinicio do Redis
+    volumes:
+      - redis_dados:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 3s
       timeout: 3s
-      retries: 5
+      retries: 10
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["${BIND_ADDR:-127.0.0.1}:16686:16686"]   # UI do rastreamento distribuido
+    restart: unless-stopped
+
+  # Armazenamento vetorial: POST /indexar (enfileira) e POST /buscar (similaridade do cosseno)
+  vetorial:
+    build:
+      context: .
+      dockerfile: servicos/vetorial/Dockerfile
+    environment:
+      <<: *rastreamento
+      OTEL_SERVICE_NAME: vetorial
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /dados
+    volumes:
+      - indice:/dados:ro            # so le o indice; quem escreve e o worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *saude
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/saude', timeout=3)"]
+
+  # Inferencia: POST /predict (sentimento) e POST /perguntar (RAG com LLM protegido)
   inferencia:
-    build: ./inferencia
-    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: servicos/inferencia/Dockerfile
     environment:
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - OTEL_SERVICE_NAME=servico-inferencia
+      <<: *rastreamento
+      OTEL_SERVICE_NAME: inferencia
+      URL_VETORIAL: http://vetorial:8002
+      LLM_API_KEY: ${LLM_API_KEY:-}          # vazio = modo simulado (offline). NUNCA no codigo.
+      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1/chat/completions}
+      LLM_MODELO: ${LLM_MODELO:-gpt-4o-mini}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-10}
+      LLM_TENTATIVAS: ${LLM_TENTATIVAS:-3}
+      LLM_BACKOFF: ${LLM_BACKOFF:-0.5}
+      LLM_LIMITE_FALHAS: ${LLM_LIMITE_FALHAS:-3}
+      LLM_ESPERA_CIRCUITO: ${LLM_ESPERA_CIRCUITO:-20}
+    restart: unless-stopped
     depends_on:
-      redis:
+      vetorial:
         condition: service_healthy
+    healthcheck:
+      <<: *saude
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/saude', timeout=3)"]
 
+  # Worker de fila: consome fila:inferencia (jobs assincronos) e fila:ingestao (indexacao).
+  # Uma unica replica: ele e o unico escritor do indice (ver k8s/ para a versao escalavel).
   worker:
-    build: ./worker
-    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: servicos/worker/Dockerfile
     environment:
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - URL_INFERENCIA=${URL_INFERENCIA:-http://inferencia:8001}
-      - TTL_RESULTADOS_SEG=${TTL_RESULTADOS_SEG:-3600}
-      - OTEL_SERVICE_NAME=worker-inferencia
+      <<: *rastreamento
+      OTEL_SERVICE_NAME: worker
+      REDIS_URL: redis://redis:6379/0
+      URL_INFERENCIA: http://inferencia:8001
+      DATA_DIR: /dados
+      TTL_RESULTADOS_SEG: ${TTL_RESULTADOS_SEG:-3600}
+      SEMEAR_DOCUMENTOS: /app/documentos   # indice vazio no 1o start -> indexa documentos/*.txt
+      WORKER_LIMITE_FALHAS: ${WORKER_LIMITE_FALHAS:-5}
+      WORKER_ESPERA_CIRCUITO: ${WORKER_ESPERA_CIRCUITO:-15}
+    volumes:
+      - indice:/dados
+    restart: unless-stopped
     depends_on:
       redis:
         condition: service_healthy
       inferencia:
-        condition: service_started
+        condition: service_healthy
 
+  # API Gateway: unica porta de entrada
   gateway:
-    build: ./gateway
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
+    build:
+      context: .
+      dockerfile: servicos/gateway/Dockerfile
     environment:
-      - URL_INFERENCIA=${URL_INFERENCIA:-http://inferencia:8001}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - JWT_SEGREDO=${JWT_SEGREDO:-troque-este-segredo-super-seguro-32chars}
-      - JWT_EXPIRACAO_MIN=${JWT_EXPIRACAO_MIN:-60}
-      - USUARIO_PADRAO=${USUARIO_PADRAO:-admin}
-      - SENHA_PADRAO=${SENHA_PADRAO:-admin123}
-      - RATE_LIMIT_RPM=${RATE_LIMIT_RPM:-30}
-      - OTEL_SERVICE_NAME=api-gateway
+      <<: *rastreamento
+      OTEL_SERVICE_NAME: api-gateway
+      AMBIENTE: ${AMBIENTE:-desenvolvimento}
+      REDIS_URL: redis://redis:6379/0
+      URL_INFERENCIA: http://inferencia:8001
+      URL_VETORIAL: http://vetorial:8002
+      JWT_SEGREDO: ${JWT_SEGREDO:-dev-somente-local-troque-em-producao-0123456789}
+      JWT_EXPIRACAO_MIN: ${JWT_EXPIRACAO_MIN:-60}
+      USUARIO_PADRAO: ${USUARIO_PADRAO:-admin}
+      SENHA_PADRAO: ${SENHA_PADRAO:-admin123}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-30}
+      TTL_RESULTADOS_SEG: ${TTL_RESULTADOS_SEG:-3600}
+      GATEWAY_TIMEOUT: ${GATEWAY_TIMEOUT:-5}                  # tempo-limite por chamada interna (s)
+      GATEWAY_TENTATIVAS: ${GATEWAY_TENTATIVAS:-3}            # retentativas (backoff exponencial + jitter)
+      GATEWAY_LIMITE_FALHAS: ${GATEWAY_LIMITE_FALHAS:-5}      # falhas seguidas que abrem o circuito
+      GATEWAY_ESPERA_CIRCUITO: ${GATEWAY_ESPERA_CIRCUITO:-30} # segundos com o circuito aberto
+    ports: ["${BIND_ADDR:-127.0.0.1}:${GATEWAY_PORTA:-8000}:8000"]   # GATEWAY_PORTA muda a porta no host
+    restart: unless-stopped
     depends_on:
       redis:
         condition: service_healthy
       inferencia:
-        condition: service_started
+        condition: service_healthy
+      vetorial:
+        condition: service_healthy
+    healthcheck:
+      <<: *saude
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/saude', timeout=3)"]
+
+  # So para a demonstracao de resiliencia do LLM:
+  #   docker compose --env-file .env.demo --profile demo up --build -d
+  llm-falso:
+    image: python:3.12-slim
+    profiles: ["demo"]
+    command: ["python", "/scripts/llm_falso.py", "9000"]
+    volumes:
+      - ./scripts:/scripts:ro
+    ports: ["127.0.0.1:9000:9000"]
+    restart: unless-stopped
+    healthcheck:
+      <<: *saude
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/modo', timeout=3)"]
+
+volumes:
+  redis_dados:
+  indice:

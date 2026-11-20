@@ -1,0 +1,103 @@
+# Inferencia: /predict (sentimento) e /perguntar (RAG: vetorial + LLM).
+# Sem estado: pode ter varias replicas. So recebe trafego de dentro do cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: inferencia
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: inferencia
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: inferencia
+  ports:
+    - name: http
+      port: 8001
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inferencia
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: inferencia
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inferencia
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inferencia
+        app.kubernetes.io/part-of: plataforma-ia
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: inferencia
+          image: ghcr.io/<owner>/plataforma-ia-inferencia:latest
+          imagePullPolicy: Always
+          command:
+            - uvicorn
+            - servicos.inferencia.app:app
+            - --host=0.0.0.0
+            - --port=8001
+            - --no-access-log
+          envFrom:
+            - configMapRef:
+                name: plataforma-ia-config
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: inferencia
+            # vazio ou ausente = LLM em modo simulado (nada sai do cluster)
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: plataforma-ia-segredos
+                  key: LLM_API_KEY
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8001
+          readinessProbe:
+            httpGet:
+              path: /saude
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /saude
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

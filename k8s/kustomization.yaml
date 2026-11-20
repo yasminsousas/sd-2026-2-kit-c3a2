@@ -1,0 +1,33 @@
+# Aplica tudo de uma vez:  kubectl apply -k k8s/
+# Ordem dos recursos: o kustomize ja ordena Namespace, ConfigMap/Secret e PVC
+# antes dos Deployments; a lista abaixo segue a mesma ordem por legibilidade.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: plataforma-ia
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml          # placeholders! remova se criar o Secret com kubectl (ver secret.yaml)
+  - indice-pvc.yaml
+  - redis.yaml
+  - jaeger.yaml
+  - inferencia.yaml
+  - vetorial.yaml
+  - worker.yaml
+  - gateway.yaml
+  - keda.yaml            # requer KEDA instalado; remova se o cluster nao tiver
+
+# Troque <owner> pelo seu usuario/organizacao do GitHub (minusculo) e, de
+# preferencia, fixe a tag no SHA do commit publicado pelo CI em vez de latest:
+#   cd k8s && kustomize edit set image ghcr.io/<owner>/plataforma-ia-gateway=ghcr.io/fulano/plataforma-ia-gateway:<sha>
+images:
+  - name: ghcr.io/<owner>/plataforma-ia-gateway
+    newTag: latest
+  - name: ghcr.io/<owner>/plataforma-ia-inferencia
+    newTag: latest
+  - name: ghcr.io/<owner>/plataforma-ia-vetorial
+    newTag: latest
+  - name: ghcr.io/<owner>/plataforma-ia-worker
+    newTag: latest

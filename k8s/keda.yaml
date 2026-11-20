@@ -1,0 +1,30 @@
+# Autoescalonamento do worker-inferencia pelo tamanho da fila (extensao opcional).
+# Requer o KEDA instalado no cluster (CRDs keda.sh/v1alpha1):
+#   helm repo add kedacore https://kedacore.github.io/charts
+#   helm install keda kedacore/keda -n keda --create-namespace
+#
+# Regra: replicas desejadas = ceil(LLEN fila:inferencia / listLength), entre
+# minReplicaCount e maxReplicaCount. Com listLength 5, 23 jobs na fila -> 5 pods.
+# Conta so a fila de espera; os jobs ja em fila:inferencia:processando nao entram.
+# O worker-ingestao NAO escala: e o escritor unico do indice.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-inferencia
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  scaleTargetRef:
+    name: worker-inferencia      # Deployment em worker.yaml
+  minReplicaCount: 1             # 0 economiza recurso, mas o 1o job paga o tempo de subir um pod
+  maxReplicaCount: 5
+  pollingInterval: 10            # segundos entre leituras do LLEN
+  cooldownPeriod: 120            # espera antes de reduzir (evita sobe-desce)
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.plataforma-ia.svc.cluster.local:6379
+        listName: fila:inferencia
+        listLength: "5"
+        databaseIndex: "0"
