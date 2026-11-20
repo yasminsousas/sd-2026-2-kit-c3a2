@@ -1,0 +1,21 @@
+# Volume do indice vetorial (DATA_DIR=/dados/indice.json).
+# worker-ingestao ESCREVE (escritor unico); vetorial so LE (montado readOnly).
+#
+# ReadWriteMany: os dois Deployments podem cair em nos diferentes e o vetorial
+# pode ter varias replicas, entao o volume precisa ser montavel em varios nos.
+# Exige uma StorageClass RWX (NFS, CephFS, AWS EFS, Azure Files, GCP Filestore).
+# Em cluster de um no (minikube, kind, k3s de laboratorio) basta trocar para
+# ReadWriteOnce: o RWO restringe por NO, nao por pod. Ver k8s/README.md.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: indice-vetorial
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  accessModes: ["ReadWriteMany"]
+  # storageClassName: nfs-client   # ajuste para a classe RWX do seu cluster
+  resources:
+    requests:
+      storage: 1Gi

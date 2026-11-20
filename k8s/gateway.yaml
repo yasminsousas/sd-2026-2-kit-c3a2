@@ -1,0 +1,175 @@
+# Gateway: UNICO ponto publico. JWT, rate limit (Redis), resiliencia nas chamadas
+# para inferencia/vetorial e publicacao em fila:inferencia.
+# 2 replicas: o estado (rate limit, jobs, resultados) fica no Redis, entao
+# qualquer replica atende qualquer requisicao.
+# Imagem: troque <owner> pelo usuario/organizacao do GitHub (minusculo) - o CI
+# publica em ghcr.io/<owner>/plataforma-ia-<servico>:latest (e :<sha do commit>).
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  type: ClusterIP            # a exposicao externa e feita pelo Ingress (TLS)
+  selector:
+    app.kubernetes.io/name: gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: plataforma-ia
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0      # sempre ha uma replica pronta durante o deploy
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gateway
+        app.kubernetes.io/part-of: plataforma-ia
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # espalha as 2 replicas por nos diferentes quando possivel
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway
+      containers:
+        - name: gateway
+          image: ghcr.io/<owner>/plataforma-ia-gateway:latest
+          imagePullPolicy: Always
+          # --proxy-headers: o IP real do cliente (rate limit do /login) vem do
+          # X-Forwarded-For do Ingress. --no-access-log: o log de acesso do
+          # uvicorn grava IP do cliente (dado pessoal; ver docs/LGPD.md).
+          command:
+            - uvicorn
+            - servicos.gateway.app:app
+            - --host=0.0.0.0
+            - --port=8000
+            - --proxy-headers
+            - --forwarded-allow-ips=*
+            - --no-access-log
+          envFrom:
+            - configMapRef:
+                name: plataforma-ia-config
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: gateway
+            - name: JWT_SEGREDO
+              valueFrom:
+                secretKeyRef:
+                  name: plataforma-ia-segredos
+                  key: JWT_SEGREDO
+            - name: SENHA_PADRAO
+              valueFrom:
+                secretKeyRef:
+                  name: plataforma-ia-segredos
+                  key: SENHA_PADRAO
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /saude
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /saude
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Garante ao menos 1 replica do gateway durante drenagem de no / manutencao.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway
+  namespace: plataforma-ia
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway
+---
+# HTTPS: o cert-manager emite e renova o certificado (Let's Encrypt) e guarda
+# no Secret gateway-tls. Pre-requisitos: ingress-nginx e cert-manager instalados
+# e um ClusterIssuer chamado letsencrypt-prod (exemplo em k8s/README.md).
+# Troque plataforma-ia.example.com pelo seu dominio (DNS apontando para o Ingress).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  namespace: plataforma-ia
+  labels:
+    app.kubernetes.io/name: gateway
+    app.kubernetes.io/part-of: plataforma-ia
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - plataforma-ia.example.com
+      secretName: gateway-tls
+  rules:
+    - host: plataforma-ia.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  name: http

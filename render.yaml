@@ -1,9 +1,8 @@
-# Blueprint do Render: cria a plataforma inteira (plano gratis) a partir do repositorio.
-# Render Dashboard > New > Blueprint > selecione este repositorio.
-# Detalhes em deploy/INSTRUCOES.md.
+# Blueprint do Render: cria a plataforma inteira (plano gratis) a partir deste repositorio.
+# Render Dashboard > New > Blueprint > selecione o repositorio. Passo a passo: deploy/INSTRUCOES.md
 
 services:
-  # Gateway + inferencia + worker (processos separados na mesma imagem; ver deploy/render/Dockerfile)
+  # gateway + inferencia + vetorial + worker (processos separados na mesma imagem; ver deploy/render/)
   - type: web
     name: plataforma-ia
     runtime: docker
@@ -12,15 +11,15 @@ services:
     dockerfilePath: ./deploy/render/Dockerfile
     dockerContext: .
     healthCheckPath: /saude
-    autoDeploy: true            # publica de novo a cada push na main
+    autoDeploy: true            # CD: publica de novo a cada push na branch do blueprint
     envVars:
+      - key: AMBIENTE
+        value: producao         # exige JWT_SEGREDO forte
       - key: REDIS_URL
         fromService:
           type: keyvalue
           name: plataforma-ia-redis
           property: connectionString
-      - key: URL_INFERENCIA
-        value: http://127.0.0.1:8001
       - key: JWT_SEGREDO
         generateValue: true     # o Render gera um segredo aleatorio (fora do codigo)
       - key: JWT_EXPIRACAO_MIN
@@ -33,8 +32,14 @@ services:
         value: "30"
       - key: TTL_RESULTADOS_SEG
         value: "3600"
+      - key: LLM_API_KEY        # opcional: vazio = LLM em modo simulado
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT   # opcional: ex. Grafana Cloud/Honeycomb (OTLP/HTTP)
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_HEADERS    # opcional: credencial do coletor (ex. Authorization=Basic ...)
+        sync: false
 
-  # Fila e resultados (Redis gerenciado, gratis). Acessivel so pela rede privada do Render.
+  # Filas e resultados (Redis gerenciado, gratis). So acessivel pela rede privada do Render.
   - type: keyvalue
     name: plataforma-ia-redis
     plan: free
